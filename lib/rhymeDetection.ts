@@ -50,8 +50,8 @@ const normalizeWord = (word: string): string => {
 // List of common words to exclude from rhyme detection
 // These words are often part of schemes, but they are not interesting and can connect otherwise totally distinct schemes
 const commonWordsToExclude = new Set([
-    'the', 'a', 'an', 'with', 'and', 'is', "i'm",
-    'he', 'me', 'be', 'we', 'she', 'no', 'so', 'to', 'of', 'in', 'on', 'for', 'it', 'was', 'your', 'at', 'by', 'as', 'do', 'my', 'or', 'if', 'but', 'not', 'you', 'your'
+    'the', 'ying', 'an', 'with', 'and', 'is', "im", "ill", 'that', 'a', 'its',
+    'he', 'me', 'we', 'she', 'no', 'so', 'to', 'of', 'in', 'on', 'it', 'was', 'your', 'at', 'by', 'as', 'my', 'or', 'if', 'but', 'not', 'you', 'your'
 ]);
 
 /**
@@ -162,7 +162,7 @@ function getWordParts(word: string): { text: string, startOffset: number, endOff
     const suffixes = [
         'able', 'ance', 'ation', 'ence', 'eous', 'ful', 'hood', 'ible',
         'ical', 'ious', 'ism', 'ity', 'ize', 'less', 'ment',
-        'ness', 'ous', 'ville', 'ware'
+        'ness', 'ous', 'ville', 'ware',
     ];
 
     // Check for compound words
@@ -226,24 +226,134 @@ function getWordParts(word: string): { text: string, startOffset: number, endOff
         }
     }
 
+    // Add: If word ends with 'er', 'or', or 'a' and the root is a valid word, add the root as a part
+    const erOrAEndings = ['er', 'or', 'a'];
+    for (const ending of erOrAEndings) {
+        if (normalizedWord.endsWith(ending) && normalizedWord.length > ending.length + 1) {
+            const root = normalizedWord.slice(0, -ending.length);
+            if (root.length >= 2 && getWordPhonesWithFallback(root)) {
+                result.push({
+                    text: root,
+                    startOffset: 0,
+                    endOffset: normalizedWord.length - ending.length
+                });
+            }
+        }
+    }
+
+    // If word ends with 'ing' and the root is a valid word, add the root as a part
+    if (normalizedWord.endsWith('ing') && normalizedWord.length > 5) {
+        const root = normalizedWord.slice(0, -3);
+        if (root.length >= 3 && getWordPhonesWithFallback(root)) {
+            result.push({
+                text: root,
+                startOffset: 0,
+                endOffset: normalizedWord.length - 3
+            });
+        }
+    }
+
+    // Add: If word starts with 'for' and the remainder is a valid word, add 'for' as a part
+    if (normalizedWord.startsWith('for') && normalizedWord.length > 6) {
+        result.push({
+            text: 'for',
+            startOffset: 0,
+            endOffset: 3
+        });
+    }
+
+    // Add: If word starts with 'for' and is long enough, always add 'for' as a part (regardless of CMU validity)
+    if (normalizedWord.startsWith('for') && normalizedWord.length > 6) {
+        result.push({
+            text: 'for',
+            startOffset: 0,
+            endOffset: 3
+        });
+    }
+
+    // If word ends with 'ed' and the root is a valid word, add the root as a part (e.g., 'crook' from 'crooked')
+    if (normalizedWord.endsWith('ed') && normalizedWord.length > 4) {
+        const root = normalizedWord.slice(0, -2);
+        if (root.length >= 3 && getWordPhonesWithFallback(root)) {
+            result.push({
+                text: root,
+                startOffset: 0,
+                endOffset: normalizedWord.length - 2
+            });
+        }
+    }
+
+    // --- PATCH: Add partial for any stressed EY in multi-syllable words (e.g., 'echinacea' for 'lemonade' group) ---
+    const phones = getWordPhonesWithFallback(normalizedWord);
+    if (phones && getSyllableCount(phones) > 1) {
+        for (let i = 0; i < phones.length; i++) {
+            if (phones[i].startsWith('EY')) {
+                // Map phoneme index to character range
+                const startOffset = Math.floor((i / phones.length) * normalizedWord.length);
+                // Find the next vowel or end of word for endOffset
+                let endPhonemeIdx = i + 1;
+                while (endPhonemeIdx < phones.length && !['AA', 'AE', 'AH', 'AO', 'AW', 'AY', 'EH', 'ER', 'EY', 'IH', 'IY', 'OW', 'OY', 'UH', 'UW'].includes(phones[endPhonemeIdx].replace(/[0-9]/g, ''))) {
+                    endPhonemeIdx++;
+                }
+                const endOffset = endPhonemeIdx < phones.length
+                    ? Math.floor((endPhonemeIdx / phones.length) * normalizedWord.length)
+                    : normalizedWord.length;
+                // Only add if at least 2 chars
+                if (endOffset - startOffset >= 2) {
+                    result.push({
+                        text: normalizedWord.substring(startOffset, endOffset),
+                        startOffset,
+                        endOffset
+                    });
+                }
+            }
+        }
+    }
+
     return result;
+}
+
+// Define WordInfo type
+type WordInfo = {
+    text: string;
+    line: number;
+    startChar: number;
+    endChar: number;
+    isMultiWord?: boolean;
+    isPartialWord?: boolean;
+    parentWord?: string;
+    parentPhonemes?: string[];
+    partCharStart?: number;
+    partCharEnd?: number;
+};
+
+/**
+ * Returns phonemes for a WordInfo object, handling partial words.
+ */
+function getPhonemesForWordInfo(wordInfo: WordInfo): string[] | null {
+    if (wordInfo.isPartialWord && wordInfo.parentPhonemes && wordInfo.parentWord && typeof wordInfo.partCharStart === 'number' && typeof wordInfo.partCharEnd === 'number') {
+        const parentPhonemes = wordInfo.parentPhonemes;
+        const parentLen = wordInfo.parentWord.length;
+        const partStart = wordInfo.partCharStart;
+        const partEnd = wordInfo.partCharEnd;
+        const totalPhonemes = parentPhonemes.length;
+        const startPhoneme = Math.floor((partStart / parentLen) * totalPhonemes);
+        const endPhoneme = Math.ceil((partEnd / parentLen) * totalPhonemes);
+        return parentPhonemes.slice(startPhoneme, endPhoneme);
+    } else {
+        return getWordPhonesWithFallback(wordInfo.text) || null;
+    }
 }
 
 /**
  * Returns true if two words rhyme according to the new core rules.
  */
-export const doWordsRhyme = (word1: string, word2: string): boolean => {
-    word1 = convertNumbersToWords(word1);
-    word2 = convertNumbersToWords(word2);
+export const doWordsRhyme = (word1: WordInfo, word2: WordInfo): boolean => {
+    if (word1.text === word2.text) return false;
+    if (shouldExcludeWord(word1.text) || shouldExcludeWord(word2.text)) return false;
 
-    const w1 = normalizeWord(word1);
-    const w2 = normalizeWord(word2);
-
-    if (w1 === w2) return false;
-    if (shouldExcludeWord(w1) || shouldExcludeWord(w2)) return false;
-
-    const phones1 = getWordPhonesWithFallback(w1);
-    const phones2 = getWordPhonesWithFallback(w2);
+    const phones1 = getPhonemesForWordInfo(word1);
+    const phones2 = getPhonemesForWordInfo(word2);
 
     if (!phones1 || !phones2) return false;
 
@@ -276,12 +386,103 @@ export const doWordsRhyme = (word1: string, word2: string): boolean => {
             .filter(phone => CMU_VOWELS.has(phone));
     }
 
+    let matchedEurekaTeacherPair = false;
+    if (
+        stressed1.length >= 2 &&
+        stressed2.length >= 2
+    ) {
+        const penultVowel1 = basePhoneme(phones1[stressed1[stressed1.length - 2]]);
+        const penultVowel2 = basePhoneme(phones2[stressed2[stressed2.length - 2]]);
+        const lastVowel1 = getLastVowel(phones1);
+        const lastVowel2 = getLastVowel(phones2);
+
+        const isEurekaTeacherPair = (
+            (lastVowel1 === 'AH' && lastVowel2 === 'ER') ||
+            (lastVowel1 === 'ER' && lastVowel2 === 'AH')
+        );
+
+        if (
+            penultVowel1 === penultVowel2 &&
+            lastVowel1 && lastVowel2 &&
+            (
+                lastVowel1 === lastVowel2 ||
+                isEurekaTeacherPair
+            ) &&
+            Math.abs(getSyllableCount(phones1) - getSyllableCount(phones2)) <= 1
+        ) {
+            matchedEurekaTeacherPair = true;
+            return true;
+        }
+    }
+
+    // --- FIX: Generalize AH/ER near rhyme for multi-syllable words with matching penult vowels ---
+    // If both words have at least 2 syllables, and their penultimate vowel matches, and their last vowel is AH or ER (in any order), allow as a rhyme
+    if (getSyllableCount(phones1) >= 2 && getSyllableCount(phones2) >= 2) {
+        const vowels1 = getAllVowels(phones1);
+        const vowels2 = getAllVowels(phones2);
+        if (vowels1.length >= 2 && vowels2.length >= 2) {
+            const penultVowel1 = vowels1[vowels1.length - 2];
+            const penultVowel2 = vowels2[vowels2.length - 2];
+            const lastVowel1 = vowels1[vowels1.length - 1];
+            const lastVowel2 = vowels2[vowels2.length - 1];
+            if (
+                penultVowel1 === penultVowel2 &&
+                ((lastVowel1 === 'AH' && lastVowel2 === 'ER') || (lastVowel1 === 'ER' && lastVowel2 === 'AH'))
+            ) {
+                return true;
+            }
+        }
+    }
+
+    // --- STRICTER ER/AH ENDING RULE ---
+    // If both words end in ER or AH, only allow them to rhyme with each other, not with IY or other vowels
+    const lastVowel1 = getLastVowel(phones1);
+    const lastVowel2 = getLastVowel(phones2);
+    const endsWithER = (v: string | null) => v === 'ER';
+    const endsWithAH = (v: string | null) => v === 'AH';
+    const endsWithIY = (v: string | null) => v === 'IY';
+    // If either word ends with ER or AH, only allow rhyming with the same ending or AH/ER, ER/AH
+    if (!matchedEurekaTeacherPair && ((endsWithER(lastVowel1) || endsWithAH(lastVowel1)) || (endsWithER(lastVowel2) || endsWithAH(lastVowel2)))) {
+        if (!(lastVowel1 === lastVowel2 || (endsWithER(lastVowel1) && endsWithAH(lastVowel2)) || (endsWithAH(lastVowel1) && endsWithER(lastVowel2)))) {
+            return false;
+        }
+    }
+
+    // Rule: Single-syllable words with a stressed "EY" vowel rhyme (e.g., ain't/say/plate/hey)
+    const isSingleSyllable = (phones: string[]) => phones.filter(p => CMU_VOWELS.has(basePhoneme(p))).length === 1;
+    const hasStressedEY = (phones: string[]) => phones.some(p => basePhoneme(p) === 'EY' && /[12]$/.test(p));
+    if (
+        isSingleSyllable(phones1) &&
+        isSingleSyllable(phones2) &&
+        hasStressedEY(phones1) &&
+        hasStressedEY(phones2)
+    ) {
+        return true;
+    }
+
+    // Rule: Multi-syllable words ending in a stressed vowel (like DNA) can rhyme with words that have the same last stressed vowel and a single consonant after (like plate, fate, skate, etc.)
+    if (vowel1 === vowel2) {
+        const endsAtVowel1 = idx1 === phones1.length - 1;
+        const endsAtVowel2 = idx2 === phones2.length - 1;
+        // Only one ends at the vowel, the other has one consonant after
+        if (endsAtVowel1 !== endsAtVowel2) {
+            const afterVowelPhones = endsAtVowel1 ? phones2 : phones1;
+            // Check if only one consonant after the vowel
+            if (afterVowelPhones.length === (endsAtVowel1 ? idx2 : idx1) + 2) {
+                // The last phoneme must be a consonant
+                if (!CMU_VOWELS.has(basePhoneme(afterVowelPhones[afterVowelPhones.length - 1]))) {
+                    return true;
+                }
+            }
+        }
+    }
+
     // Rule 1: Same (or similar) last stressed vowel AND same last phoneme
     if (
         vowelsRhymeEquivalent(vowel1, vowel2) &&
         basePhoneme(phones1[phones1.length - 1]) === basePhoneme(phones2[phones2.length - 1])
     ) {
-        if ((w1 === 'eureka' && w2 === 'mtv') || (w1 === 'mtv' && w2 === 'eureka')) {
+        if ((word1.text === 'eureka' && word2.text === 'mtv') || (word1.text === 'mtv' && word2.text === 'eureka')) {
             console.log("MATCH: Rule 1 - Last stressed vowel and last phoneme");
         }
         return true;
@@ -301,7 +502,7 @@ export const doWordsRhyme = (word1: string, word2: string): boolean => {
 
             if (!singleSyllableCheck) {
                 // Not a single syllable word ending in vowel, don't match
-                if ((w1 === 'eureka' && w2 === 'mtv') || (w1 === 'mtv' && w2 === 'eureka')) {
+                if ((word1.text === 'eureka' && word2.text === 'mtv') || (word1.text === 'mtv' && word2.text === 'eureka')) {
                     console.log("Rule 2 rejected - word ending in vowel is not single syllable");
                 }
                 return false;
@@ -314,7 +515,7 @@ export const doWordsRhyme = (word1: string, word2: string): boolean => {
                 return false;
             }
 
-            if ((w1 === 'eureka' && w2 === 'mtv') || (w1 === 'mtv' && w2 === 'eureka')) {
+            if ((word1.text === 'eureka' && word2.text === 'mtv') || (word1.text === 'mtv' && word2.text === 'eureka')) {
                 console.log("MATCH: Rule 2 - One word ends at vowel");
                 console.log(`endsAtVowel1: ${endsAtVowel1}, endsAtVowel2: ${endsAtVowel2}`);
                 console.log(`Word ending in vowel has syllable count: ${endsAtVowel1 ? getSyllableCount(phones1) : getSyllableCount(phones2)}`);
@@ -332,7 +533,7 @@ export const doWordsRhyme = (word1: string, word2: string): boolean => {
             !CMU_VOWELS.has(basePhoneme(end2)) &&
             areSimilarConsonants(basePhoneme(end1), basePhoneme(end2))
         ) {
-            if ((w1 === 'eureka' && w2 === 'mtv') || (w1 === 'mtv' && w2 === 'eureka')) {
+            if ((word1.text === 'eureka' && word2.text === 'mtv') || (word1.text === 'mtv' && word2.text === 'eureka')) {
                 console.log("MATCH: Rule 3 - Similar ending consonant");
             }
             return true;
@@ -350,7 +551,7 @@ export const doWordsRhyme = (word1: string, word2: string): boolean => {
             if (
                 (end1 === 'S' || end1 === 'Z' || end2 === 'S' || end2 === 'Z')
             ) {
-                if ((w1 === 'eureka' && w2 === 'mtv') || (w1 === 'mtv' && w2 === 'eureka')) {
+                if ((word1.text === 'eureka' && word2.text === 'mtv') || (word1.text === 'mtv' && word2.text === 'eureka')) {
                     console.log("MATCH: Rule 4 - S/Z ending");
                 }
                 return true;
@@ -359,22 +560,27 @@ export const doWordsRhyme = (word1: string, word2: string): boolean => {
     }
 
     // Rule 5: Both end in IY (stressed or unstressed), and share the same first vowel
+    // RESTRICTED: Only allow if both are single-syllable, or both have last stressed vowel IY
     if (
         basePhoneme(phones1[phones1.length - 1]) === 'IY' &&
         basePhoneme(phones2[phones2.length - 1]) === 'IY'
     ) {
-        // Get all vowels regardless of stress
         const allVowels1 = getAllVowels(phones1);
         const allVowels2 = getAllVowels(phones2);
-
-        if (allVowels1.length >= 2 &&
+        const bothSingleSyllable = isSingleSyllable(phones1) && isSingleSyllable(phones2);
+        const bothLastStressedIY = phones1[idx1] === 'IY' && phones2[idx2] === 'IY';
+        if (
+            (bothSingleSyllable || bothLastStressedIY) &&
+            allVowels1.length >= 2 &&
             allVowels2.length >= 2 &&
-            allVowels1[0] === allVowels2[0]) {
-
+            allVowels1[0] === allVowels2[0]
+        ) {
             return true;
         }
-
-        if (stressed1.length >= 2 && stressed2.length >= 2) {
+        if (
+            (bothSingleSyllable || bothLastStressedIY) &&
+            stressed1.length >= 2 && stressed2.length >= 2
+        ) {
             const penultVowel1 = basePhoneme(phones1[stressed1[stressed1.length - 2]]);
             const penultVowel2 = basePhoneme(phones2[stressed2[stressed2.length - 2]]);
             if (penultVowel1 === penultVowel2) {
@@ -385,10 +591,6 @@ export const doWordsRhyme = (word1: string, word2: string): boolean => {
 
     // Rule 6: Single-syllable words with a stressed "EH" vowel rhyme
     // (e.g., stressed/neck/best/let/bet)
-    const isSingleSyllable = (phones: string[]) => {
-        // Count vowels (syllables)
-        return phones.filter(p => CMU_VOWELS.has(basePhoneme(p))).length === 1;
-    };
     const hasStressedEH = (phones: string[]) => {
         return phones.some(p => basePhoneme(p) === 'EH' && /[12]$/.test(p));
     };
@@ -424,8 +626,8 @@ export const doWordsRhyme = (word1: string, word2: string): boolean => {
             const endsWithL2 = phones2[phones2.length - 1] && basePhoneme(phones2[phones2.length - 1]) === 'L';
             const endsWithR1 = phones1[phones1.length - 1] && basePhoneme(phones1[phones1.length - 1]) === 'R';
             const endsWithR2 = phones2[phones2.length - 1] && basePhoneme(phones2[phones2.length - 1]) === 'R';
-            const endsWithN1 = phones1[phones1.length - 1] && basePhoneme(phones1[phones1.length - 1]) === 'N';
-            const endsWithN2 = phones2[phones2.length - 1] && basePhoneme(phones2[phones2.length - 1]) === 'N';
+            const endsWithN1 = phones1[phones1.length - 1] && (basePhoneme(phones1[phones1.length - 1]) === 'N' || basePhoneme(phones1[phones1.length - 1]) === 'NG' || basePhoneme(phones1[phones1.length - 1]) === 'M');
+            const endsWithN2 = phones2[phones2.length - 1] && (basePhoneme(phones2[phones2.length - 1]) === 'N' || basePhoneme(phones2[phones2.length - 1]) === 'NG' || basePhoneme(phones2[phones2.length - 1]) === 'M');
             const endsWithM1 = phones1[phones1.length - 1] && basePhoneme(phones1[phones1.length - 1]) === 'M';
             const endsWithM2 = phones2[phones2.length - 1] && basePhoneme(phones2[phones2.length - 1]) === 'M';
 
@@ -444,6 +646,13 @@ export const doWordsRhyme = (word1: string, word2: string): boolean => {
                 if (nasalEnding1 !== nasalEnding2) {
                     return false;
                 }
+            }
+
+            // --- NEW: For any vowel, if one ends with a nasal (N, NG, M) and the other does not, do not rhyme ---
+            const nasalEnding1 = endsWithN1;
+            const nasalEnding2 = endsWithN2;
+            if (nasalEnding1 !== nasalEnding2) {
+                return false;
             }
 
             // Special case 3: OW + L words (like "bowl") vs. other OW words
@@ -486,47 +695,6 @@ export const doWordsRhyme = (word1: string, word2: string): boolean => {
         }
     }
 
-    // Rule 8: 2nd last stressed vowel is the same, end in a near vowel pair, and syllable count within 1
-    const EXTENDED_SIMILAR_VOWEL_PAIRS: [string, string][] = [
-        ...SIMILAR_VOWEL_PAIRS,
-        ['AH', 'ER'],
-        ['ER', 'AH'],
-    ];
-    const vowelsNearEquivalent = (v1: string, v2: string) => {
-        if (v1 === v2) return true;
-        return EXTENDED_SIMILAR_VOWEL_PAIRS.some(
-            ([a, b]) => (v1 === a && v2 === b) || (v1 === b && v2 === a)
-        );
-
-    };
-
-    if (
-        stressed1.length >= 2 &&
-        stressed2.length >= 2
-    ) {
-        const penultVowel1 = basePhoneme(phones1[stressed1[stressed1.length - 2]]);
-        const penultVowel2 = basePhoneme(phones2[stressed2[stressed2.length - 2]]);
-        const lastVowel1 = getLastVowel(phones1);
-        const lastVowel2 = getLastVowel(phones2);
-
-        const isEurekaTeacherPair = (
-            (lastVowel1 === 'AH' && lastVowel2 === 'ER') ||
-            (lastVowel1 === 'ER' && lastVowel2 === 'AH')
-        );
-
-        if (
-            penultVowel1 === penultVowel2 &&
-            lastVowel1 && lastVowel2 &&
-            (
-                lastVowel1 === lastVowel2 ||
-                isEurekaTeacherPair
-            ) &&
-            Math.abs(getSyllableCount(phones1) - getSyllableCount(phones2)) <= 1
-        ) {
-            return true;
-        }
-    }
-
     // Special rule for "ING/INE/IN" endings that share the same stressed vowel
     if (vowelsRhymeEquivalent(vowel1, vowel2)) {
         // Get endings after the stressed vowel
@@ -548,7 +716,7 @@ export const doWordsRhyme = (word1: string, word2: string): boolean => {
     }
 
     // Special rule for multi-word phrases with phonetic patterns similar to "-ing/-in/-ion" endings
-    if (w1.includes(' ') || w2.includes(' ')) {
+    if (word1.text.includes(' ') || word2.text.includes(' ')) {
 
         // Get the core vowel sound from the stressed vowel in both words
         const coreVowel1 = vowel1;
@@ -585,6 +753,59 @@ export const doWordsRhyme = (word1: string, word2: string): boolean => {
         }
     }
 
+    // --- SPECIAL: Allow OY1 to rhyme with AO1 R or OW1 R endings (e.g., destroy/door/score/more) ---
+    // Restrict: Only allow if neither word ends in IY (prevents armies/garvey from joining)
+    const endsWith = (phones: string[], ending: string[]) => {
+        if (phones.length < ending.length) return false;
+        for (let i = 0; i < ending.length; i++) {
+            if (basePhoneme(phones[phones.length - ending.length + i]) !== ending[i]) return false;
+        }
+        return true;
+    };
+    // OY1 ~ AO1 R
+    if (
+        (endsWith(phones1, ["OY"]) && endsWith(phones2, ["AO", "R"])) ||
+        (endsWith(phones2, ["OY"]) && endsWith(phones1, ["AO", "R"]))
+    ) {
+        // Do not allow if either word ends in IY
+        if (basePhoneme(phones1[phones1.length - 1]) === 'IY' || basePhoneme(phones2[phones2.length - 1]) === 'IY') {
+            // skip
+        } else {
+            return true;
+        }
+    }
+    // OY1 ~ OW1 R (optional, for even looser rhyme)
+    if (
+        (endsWith(phones1, ["OY"]) && endsWith(phones2, ["OW", "R"])) ||
+        (endsWith(phones2, ["OY"]) && endsWith(phones1, ["OW", "R"]))
+    ) {
+        if (basePhoneme(phones1[phones1.length - 1]) === 'IY' || basePhoneme(phones2[phones2.length - 1]) === 'IY') {
+            // skip
+        } else {
+            return true;
+        }
+    }
+
+    // --- SPECIAL: Allow multi-syllable words with last stressed vowel OW1 and last vowel IY to rhyme (e.g., homies/lonely) ---
+    // Restrict: Only allow if both words' last stressed vowel is OW1 (not AA1, etc)
+    if (
+        getSyllableCount(phones1) >= 2 &&
+        getSyllableCount(phones2) >= 2 &&
+        phones1[idx1] === 'OW1' &&
+        phones2[idx2] === 'OW1'
+    ) {
+        // Find last vowel in each word
+        const lastVowel1Idx = (() => { for (let i = phones1.length - 1; i >= 0; i--) { if (CMU_VOWELS.has(phones1[i].replace(/[0-9]/g, ''))) return i; } return -1; })();
+        const lastVowel2Idx = (() => { for (let i = phones2.length - 1; i >= 0; i--) { if (CMU_VOWELS.has(phones2[i].replace(/[0-9]/g, ''))) return i; } return -1; })();
+        if (
+            lastVowel1Idx !== -1 && lastVowel2Idx !== -1 &&
+            phones1[lastVowel1Idx].replace(/[0-9]/g, '') === 'IY' &&
+            phones2[lastVowel2Idx].replace(/[0-9]/g, '') === 'IY'
+        ) {
+            return true;
+        }
+    }
+
     return false;
 };
 
@@ -596,15 +817,6 @@ export function detectRhymes(text: string): RhymeGroup[] {
     if (!text) return [];
 
     const lines = text.split('\n');
-    type WordInfo = {
-        text: string;
-        line: number;
-        startChar: number;
-        endChar: number;
-        isMultiWord?: boolean;
-        isPartialWord?: boolean;
-        parentWord?: string;
-    };
     const words: WordInfo[] = [];
 
     // Add single words first
@@ -613,26 +825,31 @@ export function detectRhymes(text: string): RhymeGroup[] {
         const wordRegex = /\b([a-zA-Z0-9']+)\b/g;
         while ((match = wordRegex.exec(line)) !== null) {
             const fullWord = match[1];
+            const parentPhonemes = getWordPhonesWithFallback(fullWord);
             words.push({
                 text: fullWord,
                 line: lineIndex,
                 startChar: match.index,
                 endChar: match.index + fullWord.length,
                 isMultiWord: false,
-                isPartialWord: false
+                isPartialWord: false,
+                parentPhonemes
             });
 
             // Add word parts for compound words
             const wordParts = getWordParts(fullWord);
             for (const part of wordParts) {
-                if (!shouldExcludeWord(part.text)) {
+                if (!shouldExcludeWord(part.text) && parentPhonemes) {
                     words.push({
                         text: part.text,
                         line: lineIndex,
                         startChar: match.index + part.startOffset,
                         endChar: match.index + part.endOffset,
                         isPartialWord: true,
-                        parentWord: fullWord
+                        parentWord: fullWord,
+                        parentPhonemes,
+                        partCharStart: part.startOffset,
+                        partCharEnd: part.endOffset
                     });
                 }
             }
@@ -697,10 +914,12 @@ export function detectRhymes(text: string): RhymeGroup[] {
                 words[i].line === words[j].line &&
                 words[i].parentWord === words[j].parentWord;
 
+            // --- PATCH: Allow both partials from the same parent word (e.g., peep/holes in peepholes) to be included if they rhyme with different words ---
+            // Only skip overlapping if not both partials from the same parent
             if (overlapping && !bothPartialOverlapping) continue;
 
             if (Math.abs(words[i].line - words[j].line) <= MAX_LINE_DISTANCE) {
-                if (doWordsRhyme(words[i].text, words[j].text)) {
+                if (doWordsRhyme(words[i], words[j])) {
                     adjacency[i].push(j);
                     adjacency[j].push(i);
                 }
@@ -708,6 +927,7 @@ export function detectRhymes(text: string): RhymeGroup[] {
         }
     }
 
+    // --- PATCH: After group formation, allow multiple partials from the same parent word to be in different rhyme groups if they rhyme with different words ---
     // filter out invalid rhyme connections after adjacency list creation
     const removeInvalidRhymeConnections = () => {
         // helper map to track valid partial pairs
@@ -754,10 +974,17 @@ export function detectRhymes(text: string): RhymeGroup[] {
                             return false;
                         }
 
-                        // Only for longer words, ensure both parts are at least 3 chars -- prevents nonsense splits
-                        const part1Length = words[i].endChar - words[i].startChar;
-                        const part2Length = words[j].endChar - words[j].startChar;
-                        return part1Length >= 3 && part2Length >= 3;
+                        // Allow both partials from the same parent word if their character ranges do not overlap
+                        const part1Start = words[i].startChar;
+                        const part1End = words[i].endChar;
+                        const part2Start = words[j].startChar;
+                        const part2End = words[j].endChar;
+                        const nonOverlapping = part1End <= part2Start || part2End <= part1Start;
+                        if (nonOverlapping) {
+                            return true;
+                        }
+                        // If they overlap, do not allow
+                        return false;
                     }
 
                     // Different parent words - check for overlap and remove overlapping
@@ -794,14 +1021,15 @@ export function detectRhymes(text: string): RhymeGroup[] {
         if (visited[i]) continue;
         // BFS to find all connected words
         const queue = [i];
+        let head = 0; // Use a head pointer instead of shift()
         const group: number[] = [];
         visited[i] = true;
-        while (queue.length > 0) {
-            const curr = queue.shift()!;
+        while (head < queue.length) {
+            const curr = queue[head++];
             group.push(curr);
             for (const neighbor of adjacency[curr]) {
                 if (!visited[neighbor]) {
-                    visited[neighbor] = true;
+                    visited[neighbor] = true; // Mark as visited when enqueued
                     queue.push(neighbor);
                 }
             }
@@ -853,17 +1081,42 @@ export function detectRhymes(text: string): RhymeGroup[] {
 
     groupsWithAvgLine.sort((a, b) => a.avgLine - b.avgLine);
 
-    groupsWithAvgLine.forEach((group, idx) => {
-        group.color = colorPalette[idx % colorPalette.length];
-    });
+    // Expanded color palette for more distinct groups
+    const expandedColorPalette = [
+        "#ffe119", "#e6194B", "#bfef45", "#60a5fa", "#f032e6", "#00f300", "#dcbeff", "#00ffff", "#ffd8b1",
+        "#ff8f8f", "#aaffc3", "#ff7300", "#20b2aa"
+    ];
 
-    // If there are more groups than colors, try to avoid adjacent groups having the same color
-    if (groups.length > colorPalette.length) {
-        groups.forEach((group, idx) => {
-            // module w/ prime offset strategy to make sure adjacent/nearby groups have different colors
-            const colorIndex = (idx * 3) % colorPalette.length;
-            group.color = colorPalette[colorIndex];
-        });
+    // Build group adjacency graph: groups are adjacent if any of their lines are within 2 lines of each other
+    const groupAdjacency: number[][] = groupsWithAvgLine.map(() => []);
+    for (let i = 0; i < groupsWithAvgLine.length; i++) {
+        const linesA = new Set(groupsWithAvgLine[i].words.map(w => w.position.line));
+        for (let j = i + 1; j < groupsWithAvgLine.length; j++) {
+            const linesB = new Set(groupsWithAvgLine[j].words.map(w => w.position.line));
+            let isAdjacent = false;
+            for (const la of linesA) {
+                for (const lb of linesB) {
+                    if (Math.abs(la - lb) <= 2) {
+                        isAdjacent = true;
+                        break;
+                    }
+                }
+                if (isAdjacent) break;
+            }
+            if (isAdjacent) {
+                groupAdjacency[i].push(j);
+                groupAdjacency[j].push(i);
+            }
+        }
+    }
+
+    // Greedy graph coloring: assign the lowest-index color not used by any neighbor
+    const groupColors: string[] = new Array(groupsWithAvgLine.length);
+    for (let i = 0; i < groupsWithAvgLine.length; i++) {
+        const neighborColors = new Set(groupAdjacency[i].map(j => groupColors[j]).filter(Boolean));
+        const color = expandedColorPalette.find(c => !neighborColors.has(c)) || expandedColorPalette[0];
+        groupColors[i] = color;
+        groupsWithAvgLine[i].color = color;
     }
 
     return groupsWithAvgLine.map(({ avgLine, ...group }) => group);
