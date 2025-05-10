@@ -24,3 +24,23 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+.highlight {
+  font-weight: bold;
+}
+
+.rhyme-a {
+  color: var(--color-a);
+}
+
+.rhyme-b {
+  color: var(--color-b);
+}
+
+.rhyme-c {
+  color: var(--color-c);
+}
+
+.rhyme-d {
+  color: var(--color-d);
+}
