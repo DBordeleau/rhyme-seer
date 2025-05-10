@@ -6,7 +6,7 @@ import { Inter } from 'next/font/google';
 // Load the Inter font
 const inter = Inter({
   subsets: ['latin'],
-  display: 'swap',
+  display: 'optional', // Changed from 'swap' to 'optional'
   variable: '--font-inter',
 });
 
